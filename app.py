@@ -15,6 +15,10 @@ from src.embedding_search import create_embeddings
 # Import the function that searches document chunks using semantic similarity.
 from src.embedding_search import search_documents
 
+from src.answer_generator import generate_answer
+
+import time
+
 # --------------------------------------------------
 # 1. PAGE CONFIGURATION
 # --------------------------------------------------
@@ -118,6 +122,20 @@ if uploaded_file is not None:
                 chunks,
                 top_k=5
             )
+            
+            # Measure how long Gemini takes to generate its answer.
+            start_time = time.perf_counter()
+
+            with st.spinner("Generating answer..."):
+                answer = generate_answer(question, search_results)
+
+            # Calculate and display the response time.
+            response_time = time.perf_counter() - start_time
+            st.caption(f"Gemini response time: {response_time:.2f} seconds")
+
+            # Display the AI-generated answer.
+            st.subheader("AI-Generated Answer")
+            st.write(answer)
             
             # Display the retrieved passages.
             st.subheader("Relevant Document Passages")
