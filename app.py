@@ -14,13 +14,11 @@ from src.embedding_search import create_embeddings
 
 # Import the function that searches document chunks using semantic similarity.
 from src.embedding_search import search_documents
-
 from src.answer_generator import generate_answer
-
 import time
-
 from src.financial_extractor import extract_financial_figures
 import pandas as pd
+from src.clean_tab_financial_analysis import create_financial_analysis_dataframe
 
 
 
@@ -93,26 +91,68 @@ if uploaded_file is not None:
 
             st.success("Financial figures extracted successfully!")
 
-            # Display the structured output for inspection.
-            st.subheader("Extracted Financial Figures")
-            #st.json(financial_data)
             
-            # Convert the extracted financial records into a Pandas DataFrame.
+            # Create a DataFrame containing the original extracted records.
             financial_df = pd.DataFrame(financial_data["figures"])
 
-            # Sort the records by fiscal year and metric name.
+            # Sort records by fiscal year and metric name.
             financial_df = financial_df.sort_values(
                 by=["fiscal_year", "metric_name"],
                 ascending=[False, True]
             ).reset_index(drop=True)
 
-            # Display the financial figures in a structured table.
-            st.subheader("Financial Data Table")
-            st.dataframe(
-                financial_df,
-                use_container_width=True,
-                hide_index=True
-            )
+            # Create separate tabs for the original and cleaned data.
+            raw_tab, cleaned_tab = st.tabs([
+                "Raw Extracted Data",
+                "Cleaned Financial Data"
+            ])
+
+            # Display the original Gemini extraction without modifying it.
+            with raw_tab:
+                st.subheader("Raw Financial Data")
+                st.dataframe(
+                    financial_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
+
+            
+            # Generate the simplified financial analysis table.
+            with cleaned_tab:
+
+                st.subheader("Cleaned Financial Data")
+
+                # Process the extracted figures using our analysis module.
+                analysis_df = create_financial_analysis_dataframe(
+                    financial_data["figures"]
+                )
+
+                # Count the records that need further inspection.
+                flagged_count = (
+                    analysis_df["review_flag"].ne("").sum()
+                )
+
+                # Display a few useful summary statistics.
+                col1, col2 = st.columns(2)
+
+                with col1:
+                    st.metric(
+                        "Financial Figures",
+                        len(analysis_df)
+                    )
+
+                with col2:
+                    st.metric(
+                        "Figures Requiring Review",
+                        int(flagged_count)
+                    )
+
+                # Display the simplified financial analysis table.
+                st.dataframe(
+                    analysis_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
 
         # Split the extracted PDF text into smaller sections.
         # Each chunk contains its text and original PDF page number.
