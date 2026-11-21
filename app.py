@@ -19,6 +19,12 @@ from src.answer_generator import generate_answer
 
 import time
 
+from src.financial_extractor import extract_financial_figures
+import pandas as pd
+
+
+
+
 # --------------------------------------------------
 # 1. PAGE CONFIGURATION
 # --------------------------------------------------
@@ -76,6 +82,37 @@ if uploaded_file is not None:
         # Send the uploaded PDF to our extraction function.
         # The function returns the text from each page.
         pages = extract_text_from_pdf(uploaded_file)
+        
+        # Let the user choose when to run financial extraction.
+        if st.button("Extract Financial Figures"):
+
+            with st.spinner("Extracting financial figures with Gemini..."):
+
+                # Extract structured financial data from the PDF pages.
+                financial_data = extract_financial_figures(pages)
+
+            st.success("Financial figures extracted successfully!")
+
+            # Display the structured output for inspection.
+            st.subheader("Extracted Financial Figures")
+            #st.json(financial_data)
+            
+            # Convert the extracted financial records into a Pandas DataFrame.
+            financial_df = pd.DataFrame(financial_data["figures"])
+
+            # Sort the records by fiscal year and metric name.
+            financial_df = financial_df.sort_values(
+                by=["fiscal_year", "metric_name"],
+                ascending=[False, True]
+            ).reset_index(drop=True)
+
+            # Display the financial figures in a structured table.
+            st.subheader("Financial Data Table")
+            st.dataframe(
+                financial_df,
+                use_container_width=True,
+                hide_index=True
+            )
 
         # Split the extracted PDF text into smaller sections.
         # Each chunk contains its text and original PDF page number.
