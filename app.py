@@ -84,75 +84,99 @@ if uploaded_file is not None:
         # Let the user choose when to run financial extraction.
         if st.button("Extract Financial Figures"):
 
-            with st.spinner("Extracting financial figures with Gemini..."):
+            try:
+                with st.spinner("Extracting financial figures with Gemini..."):
 
-                # Extract structured financial data from the PDF pages.
-                financial_data = extract_financial_figures(pages)
+                    # Extract structured financial data from the PDF.
+                    financial_data = extract_financial_figures(pages)
 
-            st.success("Financial figures extracted successfully!")
+                st.success("Financial figures extracted successfully!")
 
-            
-            # Create a DataFrame containing the original extracted records.
-            financial_df = pd.DataFrame(financial_data["figures"])
+            except ValueError as error:
 
-            # Sort records by fiscal year and metric name.
-            financial_df = financial_df.sort_values(
-                by=["fiscal_year", "metric_name"],
-                ascending=[False, True]
-            ).reset_index(drop=True)
-
-            # Create separate tabs for the original and cleaned data.
-            raw_tab, cleaned_tab = st.tabs([
-                "Raw Extracted Data",
-                "Cleaned Financial Data"
-            ])
-
-            # Display the original Gemini extraction without modifying it.
-            with raw_tab:
-                st.subheader("Raw Financial Data")
-                st.dataframe(
-                    financial_df,
-                    use_container_width=True,
-                    hide_index=True
-                )
-
-            
-            # Generate the simplified financial analysis table.
-            with cleaned_tab:
-
-                st.subheader("Cleaned Financial Data")
-
-                # Process the extracted figures using our analysis module.
-                analysis_df = create_financial_analysis_dataframe(
-                    financial_data["figures"]
-                )
-
-                # Count the records that need further inspection.
-                flagged_count = (
-                    analysis_df["review_flag"].ne("").sum()
-                )
-
-                # Display a few useful summary statistics.
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    st.metric(
-                        "Financial Figures",
-                        len(analysis_df)
+                # Handle documents without financial statements separately.
+                if (
+                    "No relevant financial statement pages" in str(error)
+                    or "No financial figures could be extracted" in str(error)
+                ):
+                    st.info(
+                        "No financial statements or extractable financial "
+                        "figures were detected in this document. "
+                        "You can still use document question answering."
                     )
 
-                with col2:
-                    st.metric(
-                        "Figures Requiring Review",
-                        int(flagged_count)
+                else:
+                    st.error(
+                        f"Financial extraction could not be completed: {error}"
                     )
 
-                # Display the simplified financial analysis table.
-                st.dataframe(
-                    analysis_df,
-                    use_container_width=True,
-                    hide_index=True
+            except Exception as error:
+
+                # Report unexpected extraction or API failures.
+                st.error(
+                    f"Financial extraction failed: {error}"
                 )
+
+            else:
+
+                # Create the original extracted financial DataFrame.
+                financial_df = pd.DataFrame(financial_data["figures"])
+
+                financial_df = financial_df.sort_values(
+                    by=["fiscal_year", "metric_name"],
+                    ascending=[False, True]
+                ).reset_index(drop=True)
+
+                # Create separate raw and cleaned data tabs.
+                raw_tab, cleaned_tab = st.tabs([
+                    "Raw Extracted Data",
+                    "Cleaned Financial Data"
+                ])
+
+                # Display all original extracted records.
+                with raw_tab:
+
+                    st.subheader("Raw Financial Data")
+
+                    st.dataframe(
+                        financial_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+                # Display the simplified financial analysis.
+                with cleaned_tab:
+
+                    st.subheader("Cleaned Financial Data")
+
+                    analysis_df = create_financial_analysis_dataframe(
+                        financial_data["figures"]
+                    )
+
+                    flagged_count = (
+                        analysis_df["review_flag"].ne("").sum()
+                    )
+
+                    col1, col2 = st.columns(2)
+
+                    with col1:
+                        st.metric(
+                            "Financial Figures",
+                            len(analysis_df)
+                        )
+
+                    with col2:
+                        st.metric(
+                            "Figures Requiring Review",
+                            int(flagged_count)
+                        )
+
+                    st.dataframe(
+                        analysis_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
 
         # Split the extracted PDF text into smaller sections.
         # Each chunk contains its text and original PDF page number.
@@ -197,7 +221,7 @@ if uploaded_file is not None:
                 model,
                 index,
                 chunks,
-                top_k=5
+                top_k=20
             )
             
             # Measure how long Gemini takes to generate its answer.

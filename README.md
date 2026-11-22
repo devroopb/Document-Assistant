@@ -1,67 +1,90 @@
-# Document Assistant
+# Business Document Assistant
 
-An AI-powered business document analysis application built with Python and Streamlit. It allows users to upload PDF documents, extract their contents, and retrieve relevant information through semantic search.
+An AI-powered application for analysing PDF documents, answering questions using document content, and extracting structured financial data.
 
 ## Features
 
-- **PDF Processing:** Extracts text from PDF documents while preserving page numbers.
-- **Text Chunking:** Splits extracted content into smaller sections for efficient retrieval.
-- **Semantic Search:** Uses Sentence Transformers to generate text embeddings.
-- **FAISS Retrieval:** Finds the most relevant document passages based on user queries.
-- **Source References:** Displays relevant passages alongside their original PDF page numbers.
+### Document Question Answering (RAG)
+- PDF text extraction using PyPDF.
+- Text chunking with overlap.
+- Local embeddings using Sentence Transformers.
+- FAISS semantic search.
+- Gemini-powered answers with page references.
+- Insufficient-evidence handling.
+- **Multilingual question answering:** Ask questions in different languages about document content, including questions about financial information such as total sales in foreign-language documents.
 
-## Tech Stack
+### Financial Data Extraction
+- AI-powered financial figure extraction using Gemini.
+- Extraction of metrics, fiscal years, values, currencies, scales and units.
+- Financial statement classification.
+- Data cleaning and quality checks using Pandas.
+- Detection and extraction primarily support common US and Canadian financial reporting terminology and conventions.
 
+### Technology Stack
 - Python
 - Streamlit
-- Pandas
 - PyPDF
 - Sentence Transformers
 - FAISS
+- Google Gemini API
+- Pandas
 - NumPy
 
-## Getting Started
+## Project Structure
 
-1. Clone this repository:
+```text
+Document Assistant/
+├── app.py
+├── src/
+│   ├── document_processor.py
+│   ├── text_chunker.py
+│   ├── embedding_search.py
+│   ├── answer_generator.py
+│   ├── financial_extractor.py
+│   └── clean_tab_financial_analysis.py
+├── test_files/
+├── .streamlit/
+├── .env
+├── .gitignore
+└── requirements.txt
+```
 
-   ```bash
-   git clone https://github.com/devroopb/Document-Assitant.git
-   cd Document-Assitant
-   ```
+## Installation
 
-2. Create and activate a virtual environment:
+```powershell
+git clone https://github.com/devroopb/Document-Assitant.git
+cd Document-Assitant
 
-   ```bash
-   python -m venv .venv
-   ```
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
 
-3. Install dependencies:
+pip install -r requirements.txt
+```
 
-   ```bash
-   pip install -r requirements.txt
-   ```
+Create a `.env` file and add:
 
-4. Run the application:
+```text
+GEMINI_API_KEY=your_api_key_here
+```
 
-   ```bash
-   streamlit run app.py
-   ```
+Run the application:
 
-5. Upload a PDF document and enter a question to retrieve relevant passages.
+```powershell
+streamlit run app.py
+```
 
-## Sample Document
+## Testing
 
-A sample PDF is available in the `test_files/` directory for testing the application.
+Test documents include:
+- Apple annual report (10-K).
+- Tesla annual report (10-K).
+- Red Metal Limited annual report.
+- Harry Potter and the Deathly Hallows.
+- Japanese Bible.
+- Corrupted, encrypted, scanned, handwritten, large and invalid PDF files.
 
-## Future Development
+## Limitations
 
-- AI-generated answers with document citations.
-- Financial and operational data extraction.
-- Business insights, calculations, and visualisations.
-- Multi-document analysis and integration with a larger Business Intelligence platform.
-
-## Author
-
-**Devroop Banerjee**
-
-[GitHub](https://github.com/devroopb)
+- Multilingual RAG has demonstrated cross-language question answering, but retrieval accuracy may vary by language and document.
+- Financial statement detection and structured extraction primarily target common US and Canadian annual-report terminology and reporting conventions. Other countries' accounting terminology and formats may not be reliably supported.
+- Scanned documents require further OCR evaluation.

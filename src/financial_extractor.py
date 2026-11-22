@@ -49,7 +49,9 @@ def select_financial_pages(pages, max_pages=12):
     scored_pages = []
 
     for page in pages:
-        text = page["text"].lower()
+        # Convert to lowercase and normalise whitespace.
+        # This prevents line breaks from interfering with phrase matching.
+        text = " ".join(page["text"].lower().split())
         score = 0
 
         # Give more weight to pages containing statement headings.

@@ -49,7 +49,7 @@ def create_embeddings(chunks):
     return model, index
 
 
-def search_documents(question, model, index, chunks, top_k=5):
+def search_documents(question, model, index, chunks, top_k=20):
     """
     Find the most relevant document chunks for a user's question.
     """
