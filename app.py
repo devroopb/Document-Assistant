@@ -1,33 +1,21 @@
 
-# Import Streamlit to build the web application.
 import streamlit as st
-
-# Import our PDF processing function from the src folder.
-from src.document_processor import extract_text_from_pdf
-
-# Import the function that splits extracted PDF text into chunks.
-from src.text_chunker import split_into_chunks
-
-# Import the function that converts text chunks into embeddings
-# and stores them in a FAISS search index.
-from src.embedding_search import create_embeddings
-
-# Import the function that searches document chunks using semantic similarity.
-from src.embedding_search import search_documents
-from src.answer_generator import generate_answer
+import hashlib
 import time
-from src.financial_extractor import extract_financial_figures
 import pandas as pd
+
+from src.document_processor import extract_text_from_pdf
+from src.text_chunker import split_into_chunks
+from src.embedding_search import create_embeddings, search_documents
+from src.answer_generator import generate_answer
+from src.financial_extractor import extract_financial_figures
 from src.clean_tab_financial_analysis import create_financial_analysis_dataframe
-
-
 
 
 # --------------------------------------------------
 # 1. PAGE CONFIGURATION
 # --------------------------------------------------
 
-# Set the browser tab title, icon, and page layout.
 st.set_page_config(
     page_title="Business Document Assistant",
     page_icon="📄",
@@ -39,15 +27,12 @@ st.set_page_config(
 # 2. APPLICATION HEADER
 # --------------------------------------------------
 
-# Display the main application title.
 st.title("Business Document Assistant")
 
-# Display a short description below the title.
 st.caption(
     "Your workspace for business documents and evidence-based insights."
 )
 
-# Add a horizontal divider.
 st.divider()
 
 
@@ -55,85 +40,235 @@ st.divider()
 # 3. DOCUMENT UPLOAD SECTION
 # --------------------------------------------------
 
-# Display the document workspace heading.
 st.subheader("Document Workspace")
 
-# Tell the user what to do.
-st.write("Upload a PDF to begin analysing its contents.")
+st.write("Upload one or more PDFs to begin analysing their contents.")
 
-# Create a file uploader that accepts PDF files only.
-# The uploaded file is temporarily held in uploaded_file.
-uploaded_file = st.file_uploader(
-    "Choose a business document",
-    type=["pdf"]
+uploaded_files = st.file_uploader(
+    "Choose business documents",
+    type=["pdf"],
+    accept_multiple_files=True
 )
 
 
 # --------------------------------------------------
-# 4. PDF PROCESSING
+# 4. PDF PROCESSING AND SESSION STATE
 # --------------------------------------------------
 
-# Only process the document if the user has uploaded one.
-if uploaded_file is not None:
+if uploaded_files:
 
-    try:
-        # Send the uploaded PDF to our extraction function.
-        # The function returns the text from each page.
-        pages = extract_text_from_pdf(uploaded_file)
-        
-        # Let the user choose when to run financial extraction.
-        if st.button("Extract Financial Figures"):
+    # Generate a fingerprint to detect changes in uploaded documents.
+    file_signature = hashlib.sha256(
+        b"".join(
+            uploaded_file.name.encode("utf-8")
+            + hashlib.sha256(uploaded_file.getvalue()).digest()
+            for uploaded_file in uploaded_files
+        )
+    ).hexdigest()
+
+    # Process documents only when the uploaded files change.
+    if st.session_state.get("file_signature") != file_signature:
+
+        all_chunks = []
+        document_pages = []
+        processing_errors = []
+
+        for uploaded_file in uploaded_files:
 
             try:
-                with st.spinner("Extracting financial figures with Gemini..."):
+                # Extract text from the current PDF.
+                pages = extract_text_from_pdf(uploaded_file)
 
-                    # Extract structured financial data from the PDF.
-                    financial_data = extract_financial_figures(pages)
+                document_pages.append({
+                    "name": uploaded_file.name,
+                    "pages": pages
+                })
 
-                st.success("Financial figures extracted successfully!")
-
-            except ValueError as error:
-
-                # Handle documents without financial statements separately.
-                if (
-                    "No relevant financial statement pages" in str(error)
-                    or "No financial figures could be extracted" in str(error)
-                ):
-                    st.info(
-                        "No financial statements or extractable financial "
-                        "figures were detected in this document. "
-                        "You can still use document question answering."
-                    )
-
-                else:
-                    st.error(
-                        f"Financial extraction could not be completed: {error}"
-                    )
-
-            except Exception as error:
-
-                # Report unexpected extraction or API failures.
-                st.error(
-                    f"Financial extraction failed: {error}"
+                # Split the document into smaller chunks.
+                chunks = split_into_chunks(
+                    pages,
+                    chunk_size=1000,
+                    overlap=200
                 )
 
-            else:
+                # Preserve the source filename in every chunk.
+                for chunk in chunks:
+                    chunk["document"] = uploaded_file.name
 
-                # Create the original extracted financial DataFrame.
-                financial_df = pd.DataFrame(financial_data["figures"])
+                all_chunks.extend(chunks)
+
+            except Exception as error:
+                processing_errors.append(
+                    f"Unable to process {uploaded_file.name}: {error}"
+                )
+
+        # Save processed documents and chunks.
+        st.session_state.file_signature = file_signature
+        st.session_state.document_pages = document_pages
+        st.session_state.all_chunks = all_chunks
+        st.session_state.processing_errors = processing_errors
+
+        # Clear financial results when the uploaded document set changes.
+        st.session_state.financial_results = {}
+
+        # Generate one shared FAISS index.
+        if all_chunks:
+
+            with st.spinner("Generating shared document embeddings..."):
+                model, index = create_embeddings(all_chunks)
+
+            st.session_state.embedding_model = model
+            st.session_state.embedding_index = index
+
+        else:
+            st.session_state.embedding_model = None
+            st.session_state.embedding_index = None
+
+    # Retrieve stored data rather than processing the PDFs again.
+    document_pages = st.session_state.document_pages
+    all_chunks = st.session_state.all_chunks
+    model = st.session_state.embedding_model
+    index = st.session_state.embedding_index
+
+    # Display processing errors, if any.
+    for error in st.session_state.processing_errors:
+        st.error(error)
+
+    if all_chunks:
+
+        st.success("Documents processed and shared index ready!")
+
+        st.write(f"**Documents processed:** {len(document_pages)}")
+        st.write(f"**Embeddings stored in FAISS:** {index.ntotal}")
+        st.write(f"**Total text chunks:** {len(all_chunks)}")
+
+
+        # --------------------------------------------------
+        # 5. DOCUMENT QUESTION ANSWERING
+        # --------------------------------------------------
+
+        with st.form("document_question_form"):
+
+            question = st.text_input(
+                "Ask a question across your documents",
+                placeholder="e.g. Compare the companies' total revenue."
+            )
+
+            submitted = st.form_submit_button("Ask Question")
+
+        # Generate an answer only when the form is submitted.
+        if submitted and question.strip():
+
+            search_results = search_documents(
+                question,
+                model,
+                index,
+                all_chunks,
+                top_k=20
+            )
+
+            start_time = time.perf_counter()
+
+            try:
+                with st.spinner("Generating answer..."):
+                    answer = generate_answer(question, search_results)
+
+                response_time = time.perf_counter() - start_time
+
+                st.caption(
+                    f"Gemini response time: {response_time:.2f} seconds"
+                )
+
+                st.subheader("AI-Generated Answer")
+                st.write(answer)
+
+                st.subheader("Relevant Document Passages")
+
+                for number, result in enumerate(search_results, start=1):
+
+                    with st.expander(
+                        f"Result {number} — {result['document']} "
+                        f"— Page {result['page']} "
+                        f"(Similarity: {result['score']:.3f})"
+                    ):
+                        st.write(result["text"])
+
+            except Exception as error:
+                st.error(
+                    f"Unable to generate an answer at the moment: {error}"
+                )
+
+
+        # --------------------------------------------------
+        # 6. FINANCIAL DATA EXTRACTION
+        # --------------------------------------------------
+
+        st.divider()
+        st.subheader("Financial Data Extraction")
+
+        selected_document_index = st.selectbox(
+            "Choose a document for financial extraction",
+            options=range(len(document_pages)),
+            format_func=lambda i: document_pages[i]["name"]
+        )
+
+        selected_document = document_pages[selected_document_index]
+        selected_document_name = selected_document["name"]
+        selected_pages = selected_document["pages"]
+
+        # Initialise the financial results cache.
+        if "financial_results" not in st.session_state:
+            st.session_state.financial_results = {}
+
+        # Extract figures only when requested and not already cached.
+        if st.button("Extract Financial Figures"):
+
+            if selected_document_name not in st.session_state.financial_results:
+
+                try:
+                    with st.spinner("Extracting financial figures with Gemini..."):
+
+                        financial_data = extract_financial_figures(
+                            selected_pages
+                        )
+
+                    st.session_state.financial_results[
+                        selected_document_name
+                    ] = financial_data
+
+                    st.success("Financial figures extracted successfully!")
+
+                except Exception as error:
+                    st.error(
+                        f"Financial extraction failed: {error}"
+                    )
+
+            else:
+                st.info("Using previously extracted financial data.")
+
+        # Display cached results for the selected document.
+        if selected_document_name in st.session_state.financial_results:
+
+            financial_data = st.session_state.financial_results[
+                selected_document_name
+            ]
+
+            financial_df = pd.DataFrame(
+                financial_data["figures"]
+            )
+
+            if not financial_df.empty:
 
                 financial_df = financial_df.sort_values(
                     by=["fiscal_year", "metric_name"],
                     ascending=[False, True]
                 ).reset_index(drop=True)
 
-                # Create separate raw and cleaned data tabs.
                 raw_tab, cleaned_tab = st.tabs([
                     "Raw Extracted Data",
                     "Cleaned Financial Data"
                 ])
 
-                # Display all original extracted records.
                 with raw_tab:
 
                     st.subheader("Raw Financial Data")
@@ -144,7 +279,6 @@ if uploaded_file is not None:
                         hide_index=True
                     )
 
-                # Display the simplified financial analysis.
                 with cleaned_tab:
 
                     st.subheader("Cleaned Financial Data")
@@ -177,118 +311,43 @@ if uploaded_file is not None:
                         hide_index=True
                     )
 
+            else:
+                st.info("No financial figures are available to display.")
 
-        # Split the extracted PDF text into smaller sections.
-        # Each chunk contains its text and original PDF page number.
-        chunks = split_into_chunks(
-            pages,
-            chunk_size=1000,
-            overlap=200
-        )
-        
+
         # --------------------------------------------------
-        # GENERATE DOCUMENT EMBEDDINGS
+        # 7. DOCUMENT PREVIEWS
         # --------------------------------------------------
 
-        # Show a progress message while the model processes the text.
-        with st.spinner("Generating document embeddings..."):
-
-            # Convert all chunks into numerical embeddings
-            # and store them in a FAISS search index.
-            model, index = create_embeddings(chunks)
-
-        # Display the number of embeddings successfully stored.
-        st.success("Document embeddings generated successfully!")
-
-        st.write(f"**Embeddings stored in FAISS:** {index.ntotal}")
-        
-        # --------------------------------------------------
-        # DOCUMENT QUESTION INPUT
-        # --------------------------------------------------
-
-        # Allow the user to enter a question about the uploaded PDF.
-        question = st.text_input(
-            "Ask a question about your document",
-            placeholder="e.g. What was the company's total revenue?"
-        )
-        
-        # Only search the document when the user enters a question.
-        if question:
-
-            # Find the five most relevant text chunks.
-            search_results = search_documents(
-                question,
-                model,
-                index,
-                chunks,
-                top_k=20
-            )
-            
-            # Measure how long Gemini takes to generate its answer.
-            start_time = time.perf_counter()
-
-            with st.spinner("Generating answer..."):
-                answer = generate_answer(question, search_results)
-
-            # Calculate and display the response time.
-            response_time = time.perf_counter() - start_time
-            st.caption(f"Gemini response time: {response_time:.2f} seconds")
-
-            # Display the AI-generated answer.
-            st.subheader("AI-Generated Answer")
-            st.write(answer)
-            
-            # Display the retrieved passages.
-            st.subheader("Relevant Document Passages")
-
-            for number, result in enumerate(search_results, start=1):
-
-                # Show the matching passage and its original PDF page.
-                with st.expander(
-                    f"Result {number} — Page {result['page']} "
-                    f"(Similarity: {result['score']:.3f})"
-                ):
-                    st.write(result["text"])
-
-        # Display the total number of chunks created.
-        st.write(f"**Text chunks created:** {len(chunks)}")
-        # Create an expandable section to inspect the generated chunks.
         with st.expander("Preview text chunks"):
 
-            # Loop through every chunk and display its contents.
-            for index, chunk in enumerate(chunks):
+            for chunk_number, chunk in enumerate(all_chunks, start=1):
 
-                # Show the chunk number and its original PDF page.
                 st.markdown(
-                    f"**Chunk {index + 1} — Page {chunk['page']}**"
+                    f"**Chunk {chunk_number} — "
+                    f"{chunk['document']} — Page {chunk['page']}**"
                 )
 
-                # Display the extracted text inside this chunk.
                 st.write(chunk["text"])
-
-                # Separate chunks visually.
                 st.divider()
-        # Confirm that the PDF was processed successfully.
-        st.success(f"Successfully processed: {uploaded_file.name}")
 
-        # Display how many pages contained extractable text.
-        st.write(f"**Pages containing text:** {len(pages)}")
-
-        # Create an expandable section for the extracted text.
         with st.expander("Preview extracted text"):
 
-            # Go through each page returned by the PDF processor.
-            for page in pages:
+            for document in document_pages:
 
-                # Display the original PDF page number.
-                st.markdown(f"**Page {page['page']}**")
+                st.markdown(f"### {document['name']}")
 
-                # Display the first 1,500 characters from that page.
-                st.write(page["text"][:1500])
+                st.write(
+                    f"**Pages containing text:** {len(document['pages'])}"
+                )
 
-                # Separate the pages visually.
-                st.divider()
+                for page in document["pages"]:
 
-    except Exception as error:
-        # Display an error if the PDF cannot be processed.
-        st.error(f"Unable to process this PDF: {error}")
+                    st.markdown(f"**Page {page['page']}**")
+                    st.write(page["text"][:1500])
+                    st.divider()
+
+    else:
+        st.warning(
+            "No extractable text was found in the uploaded PDFs."
+        )

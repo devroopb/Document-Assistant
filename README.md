@@ -9,18 +9,18 @@ An AI-powered application for analysing PDF documents, answering questions using
 - Text chunking with overlap.
 - Local embeddings using Sentence Transformers.
 - FAISS semantic search.
-- Gemini-powered answers with page references.
+- Gemini-powered answers with document and page references.
 - Insufficient-evidence handling.
-- **Multilingual question answering:** Ask questions in different languages about document content, including questions about financial information such as total sales in foreign-language documents.
+- Multilingual question answering, including questions about financial information in foreign-language documents.
 
 ### Financial Data Extraction
 - AI-powered financial figure extraction using Gemini.
 - Extraction of metrics, fiscal years, values, currencies, scales and units.
 - Financial statement classification.
 - Data cleaning and quality checks using Pandas.
-- Detection and extraction primarily support common US and Canadian financial reporting terminology and conventions.
+- Primarily supports common US and Canadian financial reporting terminology and conventions.
 
-### Technology Stack
+## Technology Stack
 - Python
 - Streamlit
 - PyPDF
@@ -75,16 +75,22 @@ streamlit run app.py
 
 ## Testing
 
-Test documents include:
-- Apple annual report (10-K).
-- Tesla annual report (10-K).
-- Red Metal Limited annual report.
-- Harry Potter and the Deathly Hallows.
-- Japanese Bible.
-- Corrupted, encrypted, scanned, handwritten, large and invalid PDF files.
+Test documents and cases include:
+
+- Apple 10-K annual report.
+- Tesla 10-K annual report.
+- Red Metal Limited annual report (small Australian company).
+- Hong Kong Stock Exchange financial report.
+- Japanese IBM user manual.
+- Harry Potter and the Deathly Hallows (large non-financial document).
+- Corrupted PDF.
+- Password-protected/encrypted PDF.
+- Handwritten OCR PDF.
+- Plain-text files.
+- Non-PDF files renamed with a `.pdf` extension.
 
 ## Limitations
 
-- Multilingual RAG has demonstrated cross-language question answering, but retrieval accuracy may vary by language and document.
-- Financial statement detection and structured extraction primarily target common US and Canadian annual-report terminology and reporting conventions. Other countries' accounting terminology and formats may not be reliably supported.
-- Scanned documents require further OCR evaluation.
+- Multilingual RAG supports cross-language question answering, but retrieval accuracy may vary by language and document.
+- Financial statement detection and structured extraction primarily target common US and Canadian annual-report terminology and conventions. Other countries' accounting terminology and reporting formats may not be reliably supported.
+- Scanned and handwritten documents require OCR, which is not currently implemented.

@@ -79,6 +79,7 @@ def search_documents(question, model, index, chunks, top_k=20):
         results.append({
             "text": chunks[chunk_index]["text"],
             "page": chunks[chunk_index]["page"],
+            "document": chunks[chunk_index].get("document", "Unknown document"),
             "score": float(score)
         })
 

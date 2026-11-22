@@ -27,6 +27,7 @@ def generate_answer(question, search_results):
 
     for result in search_results:
         context += (
+            f"\n[Document: {result.get('document', 'Unknown document')} "
             f"\n[Page {result['page']}]\n"
             f"{result['text']}\n"
         )
@@ -39,9 +40,9 @@ def generate_answer(question, search_results):
 
     Instructions:
     - Do not invent or assume information.
-    - Cite relevant page numbers in your answer.
     - If the evidence is insufficient, say so clearly.
     - Keep the answer concise, clear, and professional.
+    - Cite the document filename and relevant page numbers in your answer.
 
     DOCUMENT PASSAGES:
     {context}
