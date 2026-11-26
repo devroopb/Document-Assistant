@@ -10,6 +10,7 @@ from src.embedding_search import create_embeddings, search_documents
 from src.answer_generator import generate_answer
 from src.financial_extractor import extract_financial_figures
 from src.clean_tab_financial_analysis import create_financial_analysis_dataframe
+from src.duplicate_detector import detect_duplicates
 
 
 # --------------------------------------------------
@@ -19,7 +20,7 @@ from src.clean_tab_financial_analysis import create_financial_analysis_dataframe
 st.set_page_config(
     page_title="Business Document Assistant",
     page_icon="📄",
-    layout="wide"
+    layout="wide",
 )
 
 
@@ -37,7 +38,7 @@ st.divider()
 
 
 # --------------------------------------------------
-# 3. DOCUMENT UPLOAD SECTION
+# 3. DOCUMENT UPLOAD
 # --------------------------------------------------
 
 st.subheader("Document Workspace")
@@ -47,7 +48,7 @@ st.write("Upload one or more PDFs to begin analysing their contents.")
 uploaded_files = st.file_uploader(
     "Choose business documents",
     type=["pdf"],
-    accept_multiple_files=True
+    accept_multiple_files=True,
 )
 
 
@@ -57,7 +58,6 @@ uploaded_files = st.file_uploader(
 
 if uploaded_files:
 
-    # Generate a fingerprint to detect changes in uploaded documents.
     file_signature = hashlib.sha256(
         b"".join(
             uploaded_file.name.encode("utf-8")
@@ -66,7 +66,6 @@ if uploaded_files:
         )
     ).hexdigest()
 
-    # Process documents only when the uploaded files change.
     if st.session_state.get("file_signature") != file_signature:
 
         all_chunks = []
@@ -76,22 +75,24 @@ if uploaded_files:
         for uploaded_file in uploaded_files:
 
             try:
-                # Extract text from the current PDF.
                 pages = extract_text_from_pdf(uploaded_file)
+
+                document_id = hashlib.sha256(
+                    uploaded_file.getvalue()
+                ).hexdigest()
 
                 document_pages.append({
                     "name": uploaded_file.name,
-                    "pages": pages
+                    "document_id": document_id,
+                    "pages": pages,
                 })
 
-                # Split the document into smaller chunks.
                 chunks = split_into_chunks(
                     pages,
                     chunk_size=1000,
-                    overlap=200
+                    overlap=200,
                 )
 
-                # Preserve the source filename in every chunk.
                 for chunk in chunks:
                     chunk["document"] = uploaded_file.name
 
@@ -102,16 +103,14 @@ if uploaded_files:
                     f"Unable to process {uploaded_file.name}: {error}"
                 )
 
-        # Save processed documents and chunks.
         st.session_state.file_signature = file_signature
         st.session_state.document_pages = document_pages
         st.session_state.all_chunks = all_chunks
         st.session_state.processing_errors = processing_errors
-
-        # Clear financial results when the uploaded document set changes.
         st.session_state.financial_results = {}
 
-        # Generate one shared FAISS index.
+        st.session_state.pop("direct_financial_results", None)
+
         if all_chunks:
 
             with st.spinner("Generating shared document embeddings..."):
@@ -124,13 +123,11 @@ if uploaded_files:
             st.session_state.embedding_model = None
             st.session_state.embedding_index = None
 
-    # Retrieve stored data rather than processing the PDFs again.
     document_pages = st.session_state.document_pages
     all_chunks = st.session_state.all_chunks
     model = st.session_state.embedding_model
     index = st.session_state.embedding_index
 
-    # Display processing errors, if any.
     for error in st.session_state.processing_errors:
         st.error(error)
 
@@ -142,7 +139,6 @@ if uploaded_files:
         st.write(f"**Embeddings stored in FAISS:** {index.ntotal}")
         st.write(f"**Total text chunks:** {len(all_chunks)}")
 
-
         # --------------------------------------------------
         # 5. DOCUMENT QUESTION ANSWERING
         # --------------------------------------------------
@@ -151,12 +147,11 @@ if uploaded_files:
 
             question = st.text_input(
                 "Ask a question across your documents",
-                placeholder="e.g. Compare the companies' total revenue."
+                placeholder="e.g. Compare the companies' total revenue.",
             )
 
             submitted = st.form_submit_button("Ask Question")
 
-        # Generate an answer only when the form is submitted.
         if submitted and question.strip():
 
             search_results = search_documents(
@@ -164,7 +159,7 @@ if uploaded_files:
                 model,
                 index,
                 all_chunks,
-                top_k=20
+                top_k=20,
             )
 
             start_time = time.perf_counter()
@@ -198,7 +193,6 @@ if uploaded_files:
                     f"Unable to generate an answer at the moment: {error}"
                 )
 
-
         # --------------------------------------------------
         # 6. FINANCIAL DATA EXTRACTION
         # --------------------------------------------------
@@ -206,117 +200,281 @@ if uploaded_files:
         st.divider()
         st.subheader("Financial Data Extraction")
 
-        selected_document_index = st.selectbox(
-            "Choose a document for financial extraction",
-            options=range(len(document_pages)),
-            format_func=lambda i: document_pages[i]["name"]
-        )
-
-        selected_document = document_pages[selected_document_index]
-        selected_document_name = selected_document["name"]
-        selected_pages = selected_document["pages"]
-
-        # Initialise the financial results cache.
         if "financial_results" not in st.session_state:
             st.session_state.financial_results = {}
 
-        # Extract figures only when requested and not already cached.
-        if st.button("Extract Financial Figures"):
+        if st.button("Extract Financial Figures from All Documents"):
 
-            if selected_document_name not in st.session_state.financial_results:
+            extraction_errors = []
 
-                try:
-                    with st.spinner("Extracting financial figures with Gemini..."):
+            for document in document_pages:
 
-                        financial_data = extract_financial_figures(
-                            selected_pages
+                document_id = document["document_id"]
+                document_name = document["name"]
+
+                if document_id not in st.session_state.financial_results:
+
+                    try:
+                        with st.spinner(
+                            f"Extracting financial figures from {document_name}..."
+                        ):
+                            financial_data = extract_financial_figures(
+                                document["pages"]
+                            )
+
+                        st.session_state.financial_results[
+                            document_id
+                        ] = financial_data
+
+                    except Exception as error:
+                        extraction_errors.append(
+                            f"{document_name}: {error}"
                         )
 
-                    st.session_state.financial_results[
-                        selected_document_name
-                    ] = financial_data
+            for error in extraction_errors:
+                st.error(f"Financial extraction failed — {error}")
 
-                    st.success("Financial figures extracted successfully!")
+            if not extraction_errors:
+                st.success(
+                    "Financial extraction completed for all documents!"
+                )
 
-                except Exception as error:
-                    st.error(
-                        f"Financial extraction failed: {error}"
-                    )
+        # --------------------------------------------------
+        # 7. COMBINE RAW AND CLEANED DATA
+        # --------------------------------------------------
 
-            else:
-                st.info("Using previously extracted financial data.")
+        raw_frames = []
+        cleaned_frames = []
 
-        # Display cached results for the selected document.
-        if selected_document_name in st.session_state.financial_results:
+        for document in document_pages:
 
-            financial_data = st.session_state.financial_results[
-                selected_document_name
-            ]
+            document_id = document["document_id"]
+            document_name = document["name"]
 
-            financial_df = pd.DataFrame(
-                financial_data["figures"]
+            financial_data = st.session_state.financial_results.get(
+                document_id
             )
 
-            if not financial_df.empty:
+            if financial_data:
 
-                financial_df = financial_df.sort_values(
-                    by=["fiscal_year", "metric_name"],
-                    ascending=[False, True]
-                ).reset_index(drop=True)
+                figures = financial_data.get("figures", [])
 
-                raw_tab, cleaned_tab = st.tabs([
-                    "Raw Extracted Data",
-                    "Cleaned Financial Data"
-                ])
+                if figures:
 
-                with raw_tab:
+                    raw_document_df = pd.DataFrame(figures)
 
-                    st.subheader("Raw Financial Data")
+                    raw_document_df["company"] = (
+                        financial_data.get("company") or "NOT SPECIFIED"
+                    )
+
+                    raw_document_df["document_id"] = document_id
+                    raw_document_df["source_document"] = document_name
+
+                    raw_frames.append(raw_document_df)
+
+                    cleaned_document_df = create_financial_analysis_dataframe(
+                        figures,
+                        company=financial_data.get("company"),
+                        document_id=document_id,
+                        document_name=document_name,
+                    )
+
+                    cleaned_frames.append(cleaned_document_df)
+
+        raw_df = (
+            pd.concat(raw_frames, ignore_index=True)
+            if raw_frames else pd.DataFrame()
+        )
+
+        if cleaned_frames:
+
+            analysis_df = pd.concat(
+                cleaned_frames,
+                ignore_index=True,
+            )
+
+            analysis_df = detect_duplicates(analysis_df)
+
+        # --------------------------------------------------
+        # 8. FINANCIAL DATA TABS
+        # --------------------------------------------------
+
+        if raw_frames or cleaned_frames:
+
+            raw_tab, cleaned_tab, duplicate_tab = st.tabs([
+                "Raw Extracted Data",
+                "Cleaned Financial Data",
+                "Duplicate Data",
+            ])
+
+            # --------------------------------------------------
+            # RAW EXTRACTED DATA
+            # --------------------------------------------------
+
+            with raw_tab:
+
+                st.subheader("Raw Extracted Financial Data")
+
+                if not raw_df.empty:
+
+                    st.write(f"**Total extracted records:** {len(raw_df)}")
 
                     st.dataframe(
-                        financial_df,
+                        raw_df,
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
                     )
 
-                with cleaned_tab:
+                else:
+                    st.info("No raw financial figures available.")
 
-                    st.subheader("Cleaned Financial Data")
+            # --------------------------------------------------
+            # CLEANED FINANCIAL DATA
+            # --------------------------------------------------
 
-                    analysis_df = create_financial_analysis_dataframe(
-                        financial_data["figures"]
-                    )
+            with cleaned_tab:
+
+                st.subheader("Cleaned Financial Data")
+
+                if not analysis_df.empty:
 
                     flagged_count = (
                         analysis_df["review_flag"].ne("").sum()
                     )
 
-                    col1, col2 = st.columns(2)
+                    col1, col2, col3 = st.columns(3)
 
                     with col1:
                         st.metric(
                             "Financial Figures",
-                            len(analysis_df)
+                            len(analysis_df),
                         )
 
                     with col2:
                         st.metric(
                             "Figures Requiring Review",
-                            int(flagged_count)
+                            int(flagged_count),
+                        )
+
+                    with col3:
+                        st.metric(
+                            "Documents Analysed",
+                            analysis_df["document_id"].nunique(),
                         )
 
                     st.dataframe(
                         analysis_df,
                         use_container_width=True,
-                        hide_index=True
+                        hide_index=True,
                     )
 
-            else:
-                st.info("No financial figures are available to display.")
+                else:
+                    st.info("No cleaned financial data available.")
 
+            # --------------------------------------------------
+            # DUPLICATE DATA
+            # --------------------------------------------------
+
+            with duplicate_tab:
+
+                st.subheader("Duplicate Document Detection")
+
+                if not analysis_df.empty:
+
+                    document_comparison_df = (
+                        analysis_df[
+                            [
+                                "document_id",
+                                "source_document",
+                                "document_duplicate_status",
+                            ]
+                        ]
+                        .drop_duplicates()
+                        .reset_index(drop=True)
+                    )
+
+                    st.dataframe(
+                        document_comparison_df,
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+                    st.divider()
+
+                    st.subheader("Duplicate Financial Record Detection")
+
+                    duplicate_statuses = [
+                        "Duplicate document copy",
+                        "Confirmed duplicate - representative",
+                        "Confirmed duplicate",
+                        "Potential duplicate conflict",
+                        "Potential duplicate - missing value",
+                        "Insufficient context",
+                    ]
+
+                    duplicate_records_df = analysis_df[
+                        analysis_df["duplicate_status"].isin(
+                            duplicate_statuses
+                        )
+                    ]
+
+                    col1, col2, col3 = st.columns(3)
+
+                    with col1:
+                        st.metric(
+                            "Duplicate / Review Records",
+                            len(duplicate_records_df),
+                        )
+
+                    with col2:
+                        st.metric(
+                            "Confirmed Duplicate Records",
+                            int(
+                                analysis_df["duplicate_status"].isin([
+                                    "Confirmed duplicate",
+                                    "Confirmed duplicate - representative",
+                                    "Duplicate document copy",
+                                ]).sum()
+                            ),
+                        )
+
+                    with col3:
+                        st.metric(
+                            "Conflicting Records",
+                            int(
+                                (
+                                    analysis_df["duplicate_status"]
+                                    == "Potential duplicate conflict"
+                                ).sum()
+                            ),
+                        )
+
+                    if not duplicate_records_df.empty:
+
+                        st.dataframe(
+                            duplicate_records_df,
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+
+                    else:
+                        st.success(
+                            "No duplicate or potentially conflicting "
+                            "financial records were identified."
+                        )
+
+                else:
+                    st.info("No duplicate financial records available.")
+
+        else:
+
+            st.info(
+                "Upload documents and click 'Extract Financial Figures "
+                "from All Documents' to begin."
+            )
 
         # --------------------------------------------------
-        # 7. DOCUMENT PREVIEWS
+        # 9. DOCUMENT PREVIEWS
         # --------------------------------------------------
 
         with st.expander("Preview text chunks"):

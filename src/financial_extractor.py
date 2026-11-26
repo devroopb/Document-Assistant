@@ -9,29 +9,39 @@ from google import genai
 from google.genai import types
 
 
-# Load the Gemini API key from the project's .env file.
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
-# Use the same Gemini model as the rest of the project.
 MODEL_NAME = "gemini-3.5-flash-lite"
 
 
-# Financial statement headings used to identify relevant PDF pages.
 STATEMENT_HEADINGS = [
     "consolidated statements of operations",
     "consolidated statements of income",
+    "consolidated income statements",
     "consolidated balance sheets",
+    "consolidated statements of financial position",
     "consolidated statements of cash flows",
 ]
 
-# Common financial terms used to identify relevant pages.
 FINANCIAL_TERMS = [
+    "revenue",
     "net sales",
-    "total revenue",
-    "net income",
-    "operating income",
+    "cost of revenue",
+    "cost of goods sold",
+    "gross profit",
     "gross margin",
+    "operating income",
+    "income from operations",
+    "net income",
+    "current assets",
+    "current liabilities",
+    "total current assets",
+    "total current liabilities",
+    "total debt",
+    "total borrowings",
+    "total stockholders' equity",
+    "total shareholders' equity",
     "total assets",
     "total liabilities",
     "cash and cash equivalents",
@@ -39,27 +49,18 @@ FINANCIAL_TERMS = [
 
 
 def select_financial_pages(pages, max_pages=12):
-    """
-    Identify pages likely to contain financial statements.
-
-    Pages are ranked using financial statement headings
-    and commonly used financial terms.
-    """
+    """Identify pages likely to contain financial statements."""
 
     scored_pages = []
 
     for page in pages:
-        # Convert to lowercase and normalise whitespace.
-        # This prevents line breaks from interfering with phrase matching.
         text = " ".join(page["text"].lower().split())
         score = 0
 
-        # Give more weight to pages containing statement headings.
         for heading in STATEMENT_HEADINGS:
             if heading in text:
                 score += 5
 
-        # Increase the score for pages containing financial terms.
         for term in FINANCIAL_TERMS:
             if term in text:
                 score += 1
@@ -67,27 +68,21 @@ def select_financial_pages(pages, max_pages=12):
         if score > 0:
             scored_pages.append((score, page))
 
-    # Select the highest-scoring pages.
     scored_pages.sort(key=lambda item: item[0], reverse=True)
+
     selected_pages = [
         item[1] for item in scored_pages[:max_pages]
     ]
 
-    # Restore the original PDF page order.
     selected_pages.sort(key=lambda page: page["page"])
 
     return selected_pages
 
-def generate_with_retry(client, prompt, response_schema, max_attempts=5):
-    """
-    Retry Gemini requests when temporary service errors occur.
 
-    Uses exponential backoff to avoid repeatedly hitting
-    an overloaded Gemini service.
-    """
+def generate_with_retry(client, prompt, response_schema, max_attempts=5):
+    """Retry Gemini requests when temporary service errors occur."""
 
     for attempt in range(max_attempts):
-
         try:
             return client.models.generate_content(
                 model=MODEL_NAME,
@@ -102,7 +97,6 @@ def generate_with_retry(client, prompt, response_schema, max_attempts=5):
             )
 
         except Exception as error:
-
             error_code = getattr(error, "code", None)
 
             if error_code is None:
@@ -110,7 +104,6 @@ def generate_with_retry(client, prompt, response_schema, max_attempts=5):
 
             error_message = str(error).upper()
 
-            # Only retry temporary server and rate-limit errors.
             retryable = (
                 str(error_code) in {"429", "500", "502", "503", "504"}
                 or any(code in error_message for code in [
@@ -124,31 +117,23 @@ def generate_with_retry(client, prompt, response_schema, max_attempts=5):
                 ])
             )
 
-            # Immediately raise permanent errors.
             if not retryable or attempt == max_attempts - 1:
                 raise
 
-            # Wait progressively longer before retrying.
             delay = min(2 ** (attempt + 1), 30)
             delay += random.uniform(0, 1)
 
             time.sleep(delay)
 
-def extract_financial_figures(pages):
-    """
-    Extract structured financial figures from a PDF.
 
-    Each selected page is processed independently.
-    Page-level information is stored once, while individual
-    financial figures contain only their metric, year and value.
-    """
+def extract_financial_figures(pages):
+    """Extract financial figures for Raw Extracted Data."""
 
     if not api_key:
         raise ValueError(
             "Gemini API key not found. Check your .env file."
         )
 
-    # Identify pages containing financial information.
     selected_pages = select_financial_pages(pages)
 
     if not selected_pages:
@@ -156,22 +141,13 @@ def extract_financial_figures(pages):
             "No relevant financial statement pages were found."
         )
 
-    # Define a compact response structure for Gemini.
     response_schema = {
         "type": "OBJECT",
         "properties": {
-            "company": {
-                "type": "STRING"
-            },
-            "currency": {
-                "type": "STRING"
-            },
-            "scale": {
-                "type": "STRING"
-            },
-            "statement_type": {
-                "type": "STRING"
-            },
+            "company": {"type": "STRING"},
+            "currency": {"type": "STRING"},
+            "scale": {"type": "STRING"},
+            "statement_type": {"type": "STRING"},
             "figures": {
                 "type": "ARRAY",
                 "items": {
@@ -204,44 +180,39 @@ def extract_financial_figures(pages):
         ]
     }
 
-    # Create the Gemini client once for all page requests.
     client = genai.Client(api_key=api_key)
 
     all_figures = []
     company_name = "Unknown"
 
-    # Process one page at a time.
     for page in selected_pages:
-
         page_number = page["page"]
-        page_text = page["text"]
 
         prompt = f"""
         Extract the financial figures explicitly shown on this
         financial statement page.
 
-                Instructions:
-                - Extract every financial metric and fiscal year shown.
-                - Preserve numerical values exactly as printed.
-                - Identify the currency for each figure.
-                - Identify the scale for each figure.
-                - Identify the measurement unit for each figure.
-                - Use USD millions for monetary amounts reported in millions.
-                - Use USD per share for earnings per share.
-                - Use shares for share counts.
-                - Use percentages for percentage figures.
-                - Do not assign monetary units to non-monetary figures.
-                - Do not confuse gross margin amounts with percentages.
-                - Preserve negative values.
-                - Do not calculate, estimate, or invent missing figures.
-                - Distinguish balance sheet balances from cash flow changes.
-                - For cash flow changes, make the metric name explicit,
-                for example "Change in Accounts Payable".
-                - If information is unavailable, use "Not specified".
-                - Return only figures supported by this page.
+        Instructions:
+        - Extract every financial metric and fiscal year shown.
+        - Preserve numerical values exactly as printed.
+        - Identify the currency for each figure.
+        - Identify the scale for each figure.
+        - Identify the measurement unit for each figure.
+        - Use USD millions for monetary amounts reported in millions.
+        - Use USD per share for earnings per share.
+        - Use shares for share counts.
+        - Use percentages for percentage figures.
+        - Do not assign monetary units to non-monetary figures.
+        - Do not confuse gross margin amounts with percentages.
+        - Preserve negative values.
+        - Do not calculate, estimate, or invent missing figures.
+        - Distinguish balance sheet balances from cash flow changes.
+        - For cash flow changes, make the metric name explicit.
+        - If information is unavailable, use "Not specified".
+        - Return only figures supported by this page.
 
         DOCUMENT PAGE:
-        {page_text}
+        {page["text"]}
         """
 
         response = generate_with_retry(
@@ -250,7 +221,6 @@ def extract_financial_figures(pages):
             response_schema
         )
 
-        # Check whether Gemini completed its response.
         finish_reason = "Unknown"
 
         if response.candidates:
@@ -265,33 +235,19 @@ def extract_financial_figures(pages):
         if "MAX_TOKENS" in str(finish_reason):
             raise ValueError(
                 f"Gemini reached its output-token limit on PDF page "
-                f"{page_number}. The page may contain too many figures."
+                f"{page_number}."
             )
 
-        # Convert the JSON response into a Python dictionary.
-        try:
-            page_data = json.loads(response.text)
+        page_data = json.loads(response.text)
 
-        except json.JSONDecodeError as error:
-            raise ValueError(
-                f"Gemini returned invalid JSON for PDF page "
-                f"{page_number}."
-            ) from error
-
-        # Save the company name when available.
         if page_data.get("company") not in (None, "", "Unknown"):
             company_name = page_data["company"]
 
-        # Attach page-level information to each extracted figure.
         for figure in page_data.get("figures", []):
-
-            # Attach the original PDF page and statement information.
             figure["page"] = page_number
             figure["statement_type"] = page_data["statement_type"]
-
             all_figures.append(figure)
 
-    # Return the same overall structure expected by app.py.
     if not all_figures:
         raise ValueError(
             "No financial figures could be extracted from the selected pages."
