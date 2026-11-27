@@ -11,6 +11,7 @@ from src.answer_generator import generate_answer
 from src.financial_extractor import extract_financial_figures
 from src.clean_tab_financial_analysis import create_financial_analysis_dataframe
 from src.duplicate_detector import detect_duplicates
+from src.calculated_financial_analysis import calculate_metrics_with_rag
 
 
 # --------------------------------------------------
@@ -25,7 +26,147 @@ st.set_page_config(
 
 
 # --------------------------------------------------
-# 2. APPLICATION HEADER
+# 2. CALCULATED METRICS BUTTON AND COOLDOWN
+# --------------------------------------------------
+
+@st.fragment(run_every=1)
+def render_calculated_metrics():
+
+    st.subheader("Calculated Financial Metrics")
+
+    st.write(
+        "Financial figures are independently retrieved from "
+        "your uploaded documents using RAG. Python then "
+        "calculates the financial metrics.\n\n"
+        "All calculated metrics are cross checked with the AI-Generated answers."
+    )
+
+    extraction_time = st.session_state.get(
+        "financial_extraction_clicked_at"
+    )
+
+    remaining = 0
+
+    if extraction_time is not None:
+        elapsed = time.time() - extraction_time
+        remaining = max(0, 60 - int(elapsed))
+
+    if remaining > 0:
+
+        st.info(
+            f"Please wait {remaining} seconds before calculating "
+            "financial metrics. This cooldown helps separate "
+            "the financial extraction and calculation requests "
+            "so that the token limit per minute is not exceeded."
+        )
+
+    elif extraction_time is not None:
+
+        st.success("Cooldown complete. You can now calculate metrics.")
+
+    if st.button(
+        "Calculate Financial Metrics",
+        key="calculate_metrics_button",
+        disabled=remaining > 0,
+    ):
+
+        st.session_state.calculated_metrics = None
+
+        try:
+            with st.spinner(
+                "Retrieving financial figures and calculating metrics..."
+            ):
+
+                calculated_df = calculate_metrics_with_rag(
+                    st.session_state.embedding_model,
+                    st.session_state.embedding_index,
+                    st.session_state.all_chunks,
+                )
+
+            st.session_state.calculated_metrics = calculated_df
+
+        except Exception as error:
+            st.error(
+                f"Unable to calculate financial metrics: {error}"
+            )
+
+    calculated_df = st.session_state.get("calculated_metrics")
+
+    if calculated_df is None:
+
+        st.info(
+            "Click 'Calculate Financial Metrics' when the cooldown "
+            "has finished."
+        )
+
+    elif calculated_df.empty:
+
+        st.warning(
+            "No financial figures could be retrieved for calculation. "
+            "Check that the uploaded PDFs contain readable financial "
+            "statements and try again."
+        )
+
+    else:
+
+        st.success("Financial metrics calculated successfully.")
+
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric(
+                "Companies",
+                calculated_df["Company"].nunique(),
+            )
+
+        with col2:
+            st.metric(
+                "Fiscal Years",
+                calculated_df["Fiscal Year"].nunique(),
+            )
+
+        with col3:
+            st.metric(
+                "Calculated Metrics",
+                len(calculated_df),
+            )
+
+        st.divider()
+
+        for (company, fiscal_year), year_df in calculated_df.groupby(
+            ["Company", "Fiscal Year"],
+            sort=True,
+        ):
+
+            st.markdown(f"### {company} — FY {fiscal_year}")
+
+            display_df = year_df[
+                [
+                    "Metric",
+                    "Calculated Value",
+                    "Unit",
+                    "Currency",
+                ]
+            ].reset_index(drop=True)
+
+            # Keep the calculated-value column numeric for Arrow/Streamlit.
+            # Unavailable metrics remain blank rather than mixing strings and numbers.
+            display_df["Calculated Value"] = pd.to_numeric(
+                display_df["Calculated Value"],
+                errors="coerce",
+            )
+
+            st.caption("A blank calculated value means the required figures were unavailable.")
+
+            st.dataframe(
+                display_df,
+                width="stretch",
+                hide_index=True,
+            )
+
+
+# --------------------------------------------------
+# 3. APPLICATION HEADER
 # --------------------------------------------------
 
 st.title("Business Document Assistant")
@@ -38,7 +179,7 @@ st.divider()
 
 
 # --------------------------------------------------
-# 3. DOCUMENT UPLOAD
+# 4. DOCUMENT UPLOAD
 # --------------------------------------------------
 
 st.subheader("Document Workspace")
@@ -53,7 +194,18 @@ uploaded_files = st.file_uploader(
 
 
 # --------------------------------------------------
-# 4. PDF PROCESSING AND SESSION STATE
+# 5. SESSION STATE INITIALISATION
+# --------------------------------------------------
+
+if "calculated_metrics" not in st.session_state:
+    st.session_state.calculated_metrics = None
+
+if "financial_results" not in st.session_state:
+    st.session_state.financial_results = {}
+
+
+# --------------------------------------------------
+# 6. PDF PROCESSING
 # --------------------------------------------------
 
 if uploaded_files:
@@ -70,22 +222,54 @@ if uploaded_files:
 
         all_chunks = []
         document_pages = []
+        unique_document_pages = []
+        duplicate_documents = []
         processing_errors = []
+        original_by_hash = {}
 
         for uploaded_file in uploaded_files:
 
             try:
+                file_bytes = uploaded_file.getvalue()
+
+                # This SHA-256 content hash is the document_id used by the
+                # duplicate-detection workflow. It is independent of filename.
+                document_id = hashlib.sha256(file_bytes).hexdigest()
+
+                if document_id in original_by_hash:
+                    original_name = original_by_hash[document_id]
+
+                    document_pages.append({
+                        "name": uploaded_file.name,
+                        "document_id": document_id,
+                        "pages": [],
+                        "is_duplicate": True,
+                        "duplicate_of": original_name,
+                    })
+
+                    duplicate_documents.append({
+                        "Duplicate File": uploaded_file.name,
+                        "Original File": original_name,
+                        "Status": "Excluded from analysis — exact duplicate",
+                    })
+
+                    # Do not chunk, embed, extract, or calculate from this copy.
+                    continue
+
+                # Only extract the PDF text after it passes the content-hash check.
                 pages = extract_text_from_pdf(uploaded_file)
+                original_by_hash[document_id] = uploaded_file.name
 
-                document_id = hashlib.sha256(
-                    uploaded_file.getvalue()
-                ).hexdigest()
-
-                document_pages.append({
+                document = {
                     "name": uploaded_file.name,
                     "document_id": document_id,
                     "pages": pages,
-                })
+                    "is_duplicate": False,
+                    "duplicate_of": None,
+                }
+
+                document_pages.append(document)
+                unique_document_pages.append(document)
 
                 chunks = split_into_chunks(
                     pages,
@@ -105,11 +289,19 @@ if uploaded_files:
 
         st.session_state.file_signature = file_signature
         st.session_state.document_pages = document_pages
+        st.session_state.unique_document_pages = unique_document_pages
+        st.session_state.duplicate_documents = duplicate_documents
         st.session_state.all_chunks = all_chunks
         st.session_state.processing_errors = processing_errors
+
+        # Reset results when uploaded documents change.
         st.session_state.financial_results = {}
+        st.session_state.calculated_metrics = None
 
         st.session_state.pop("direct_financial_results", None)
+
+        # Reset cooldown for the new document set.
+        st.session_state.pop("financial_extraction_clicked_at", None)
 
         if all_chunks:
 
@@ -124,6 +316,8 @@ if uploaded_files:
             st.session_state.embedding_index = None
 
     document_pages = st.session_state.document_pages
+    unique_document_pages = st.session_state.unique_document_pages
+    duplicate_documents = st.session_state.duplicate_documents
     all_chunks = st.session_state.all_chunks
     model = st.session_state.embedding_model
     index = st.session_state.embedding_index
@@ -135,13 +329,31 @@ if uploaded_files:
 
         st.success("Documents processed and shared index ready!")
 
-        st.write(f"**Documents processed:** {len(document_pages)}")
-        st.write(f"**Embeddings stored in FAISS:** {index.ntotal}")
-        st.write(f"**Total text chunks:** {len(all_chunks)}")
+        col1, col2, col3 = st.columns(3)
+
+        with col1:
+            st.metric("PDFs Uploaded", len(document_pages))
+
+        with col2:
+            st.metric("Unique Documents Analysed", len(unique_document_pages))
+
+        with col3:
+            st.metric("Text Chunks", len(all_chunks))
+
+        for duplicate in duplicate_documents:
+            st.warning(
+                f"{duplicate['Duplicate File']} was not used for RAG retrieval, "
+                f"financial extraction, or calculations because it is an exact "
+                f"duplicate of {duplicate['Original File']}."
+            )
+
 
         # --------------------------------------------------
-        # 5. DOCUMENT QUESTION ANSWERING
+        # 7. DOCUMENT QUESTION ANSWERING
         # --------------------------------------------------
+
+        st.divider()
+        st.subheader("Document Question Answering")
 
         with st.form("document_question_form"):
 
@@ -177,37 +389,41 @@ if uploaded_files:
                 st.subheader("AI-Generated Answer")
                 st.write(answer)
 
-                st.subheader("Relevant Document Passages")
+                with st.expander("Relevant Document Passages", expanded=False):
 
-                for number, result in enumerate(search_results, start=1):
+                    for number, result in enumerate(search_results, start=1):
 
-                    with st.expander(
-                        f"Result {number} — {result['document']} "
-                        f"— Page {result['page']} "
-                        f"(Similarity: {result['score']:.3f})"
-                    ):
+                        st.markdown(
+                            f"**Result {number} — {result['document']} "
+                            f"— Page {result['page']} "
+                            f"(Similarity: {result['score']:.3f})**"
+                        )
                         st.write(result["text"])
+
+                        if number < len(search_results):
+                            st.divider()
 
             except Exception as error:
                 st.error(
                     f"Unable to generate an answer at the moment: {error}"
                 )
 
+
         # --------------------------------------------------
-        # 6. FINANCIAL DATA EXTRACTION
+        # 8. FINANCIAL DATA EXTRACTION
         # --------------------------------------------------
 
         st.divider()
         st.subheader("Financial Data Extraction")
 
-        if "financial_results" not in st.session_state:
-            st.session_state.financial_results = {}
+        if st.button("Extract Financial Figures from Original Documents"):
 
-        if st.button("Extract Financial Figures from All Documents"):
+            # Start the 60-second cooldown at button-click time.
+            st.session_state.financial_extraction_clicked_at = time.time()
 
             extraction_errors = []
 
-            for document in document_pages:
+            for document in unique_document_pages:
 
                 document_id = document["document_id"]
                 document_name = document["name"]
@@ -236,17 +452,18 @@ if uploaded_files:
 
             if not extraction_errors:
                 st.success(
-                    "Financial extraction completed for all documents!"
+                    "Financial extraction completed for all unique documents!"
                 )
 
+
         # --------------------------------------------------
-        # 7. COMBINE RAW AND CLEANED DATA
+        # 9. COMBINE RAW AND CLEANED DATA
         # --------------------------------------------------
 
         raw_frames = []
         cleaned_frames = []
 
-        for document in document_pages:
+        for document in unique_document_pages:
 
             document_id = document["document_id"]
             document_name = document["name"]
@@ -286,6 +503,8 @@ if uploaded_files:
             if raw_frames else pd.DataFrame()
         )
 
+        analysis_df = pd.DataFrame()
+
         if cleaned_frames:
 
             analysis_df = pd.concat(
@@ -295,187 +514,200 @@ if uploaded_files:
 
             analysis_df = detect_duplicates(analysis_df)
 
+
         # --------------------------------------------------
-        # 8. FINANCIAL DATA TABS
+        # 10. FINANCIAL DATA TABS
         # --------------------------------------------------
 
-        if raw_frames or cleaned_frames:
+        raw_tab, cleaned_tab, duplicate_tab, calculated_tab = st.tabs([
+            "Raw Extracted Data",
+            "Cleaned Financial Data",
+            "Duplicate Data",
+            "Calculated Financial Metrics",
+        ])
 
-            raw_tab, cleaned_tab, duplicate_tab = st.tabs([
-                "Raw Extracted Data",
-                "Cleaned Financial Data",
-                "Duplicate Data",
-            ])
 
-            # --------------------------------------------------
-            # RAW EXTRACTED DATA
-            # --------------------------------------------------
+        # --------------------------------------------------
+        # RAW EXTRACTED DATA
+        # --------------------------------------------------
 
-            with raw_tab:
+        with raw_tab:
 
-                st.subheader("Raw Extracted Financial Data")
+            st.subheader("Raw Extracted Financial Data")
 
-                if not raw_df.empty:
+            if not raw_df.empty:
 
-                    st.write(f"**Total extracted records:** {len(raw_df)}")
+                st.write(f"**Total extracted records:** {len(raw_df)}")
+
+                st.dataframe(
+                    raw_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            else:
+                st.info(
+                    "Click 'Extract Financial Figures from Original Documents' "
+                    "to populate this tab."
+                )
+
+
+        # --------------------------------------------------
+        # CLEANED FINANCIAL DATA
+        # --------------------------------------------------
+
+        with cleaned_tab:
+
+            st.subheader("Cleaned Financial Data")
+
+            if not analysis_df.empty:
+
+                flagged_count = (
+                    analysis_df["review_flag"].ne("").sum()
+                )
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("Financial Figures", len(analysis_df))
+
+                with col2:
+                    st.metric(
+                        "Figures Requiring Review",
+                        int(flagged_count),
+                    )
+
+                with col3:
+                    st.metric(
+                        "Documents Analysed",
+                        analysis_df["document_id"].nunique(),
+                    )
+
+                st.dataframe(
+                    analysis_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            else:
+                st.info(
+                    "Click 'Extract Financial Figures from Original Documents' "
+                    "to populate this tab."
+                )
+
+
+        # --------------------------------------------------
+        # DUPLICATE DATA
+        # --------------------------------------------------
+
+        with duplicate_tab:
+
+            st.subheader("Duplicate Document Detection")
+
+            if duplicate_documents:
+
+                st.warning(
+                    f"{len(duplicate_documents)} duplicate PDF(s) were excluded "
+                    "from RAG retrieval, financial extraction, and calculations."
+                )
+
+                document_comparison_df = pd.DataFrame(duplicate_documents)
+
+                st.dataframe(
+                    document_comparison_df,
+                    width="stretch",
+                    hide_index=True,
+                )
+
+            else:
+                st.success("No exact duplicate PDF copies were uploaded.")
+
+            st.divider()
+            st.subheader("Duplicate Financial Record Detection")
+
+            if not analysis_df.empty:
+
+                duplicate_statuses = [
+                    "Duplicate document copy",
+                    "Confirmed duplicate - representative",
+                    "Confirmed duplicate",
+                    "Potential duplicate conflict",
+                    "Potential duplicate - missing value",
+                    "Insufficient context",
+                ]
+
+                duplicate_records_df = analysis_df[
+                    analysis_df["duplicate_status"].isin(
+                        duplicate_statuses
+                    )
+                ]
+
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric(
+                        "Duplicate / Review Records",
+                        len(duplicate_records_df),
+                    )
+
+                with col2:
+                    st.metric(
+                        "Confirmed Duplicate Records",
+                        int(
+                            analysis_df["duplicate_status"].isin([
+                                "Confirmed duplicate",
+                                "Confirmed duplicate - representative",
+                                "Duplicate document copy",
+                            ]).sum()
+                        ),
+                    )
+
+                with col3:
+                    st.metric(
+                        "Conflicting Records",
+                        int(
+                            (
+                                analysis_df["duplicate_status"]
+                                == "Potential duplicate conflict"
+                            ).sum()
+                        ),
+                    )
+
+                if not duplicate_records_df.empty:
 
                     st.dataframe(
-                        raw_df,
-                        use_container_width=True,
+                        duplicate_records_df,
+                        width="stretch",
                         hide_index=True,
                     )
 
                 else:
-                    st.info("No raw financial figures available.")
-
-            # --------------------------------------------------
-            # CLEANED FINANCIAL DATA
-            # --------------------------------------------------
-
-            with cleaned_tab:
-
-                st.subheader("Cleaned Financial Data")
-
-                if not analysis_df.empty:
-
-                    flagged_count = (
-                        analysis_df["review_flag"].ne("").sum()
+                    st.success(
+                        "No duplicate or potentially conflicting "
+                        "financial records were identified among the "
+                        "unique documents."
                     )
 
-                    col1, col2, col3 = st.columns(3)
+            else:
+                st.info(
+                    "Extract financial figures from the original documents "
+                    "to run financial-record duplicate detection."
+                )
 
-                    with col1:
-                        st.metric(
-                            "Financial Figures",
-                            len(analysis_df),
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Figures Requiring Review",
-                            int(flagged_count),
-                        )
-
-                    with col3:
-                        st.metric(
-                            "Documents Analysed",
-                            analysis_df["document_id"].nunique(),
-                        )
-
-                    st.dataframe(
-                        analysis_df,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                else:
-                    st.info("No cleaned financial data available.")
-
-            # --------------------------------------------------
-            # DUPLICATE DATA
-            # --------------------------------------------------
-
-            with duplicate_tab:
-
-                st.subheader("Duplicate Document Detection")
-
-                if not analysis_df.empty:
-
-                    document_comparison_df = (
-                        analysis_df[
-                            [
-                                "document_id",
-                                "source_document",
-                                "document_duplicate_status",
-                            ]
-                        ]
-                        .drop_duplicates()
-                        .reset_index(drop=True)
-                    )
-
-                    st.dataframe(
-                        document_comparison_df,
-                        use_container_width=True,
-                        hide_index=True,
-                    )
-
-                    st.divider()
-
-                    st.subheader("Duplicate Financial Record Detection")
-
-                    duplicate_statuses = [
-                        "Duplicate document copy",
-                        "Confirmed duplicate - representative",
-                        "Confirmed duplicate",
-                        "Potential duplicate conflict",
-                        "Potential duplicate - missing value",
-                        "Insufficient context",
-                    ]
-
-                    duplicate_records_df = analysis_df[
-                        analysis_df["duplicate_status"].isin(
-                            duplicate_statuses
-                        )
-                    ]
-
-                    col1, col2, col3 = st.columns(3)
-
-                    with col1:
-                        st.metric(
-                            "Duplicate / Review Records",
-                            len(duplicate_records_df),
-                        )
-
-                    with col2:
-                        st.metric(
-                            "Confirmed Duplicate Records",
-                            int(
-                                analysis_df["duplicate_status"].isin([
-                                    "Confirmed duplicate",
-                                    "Confirmed duplicate - representative",
-                                    "Duplicate document copy",
-                                ]).sum()
-                            ),
-                        )
-
-                    with col3:
-                        st.metric(
-                            "Conflicting Records",
-                            int(
-                                (
-                                    analysis_df["duplicate_status"]
-                                    == "Potential duplicate conflict"
-                                ).sum()
-                            ),
-                        )
-
-                    if not duplicate_records_df.empty:
-
-                        st.dataframe(
-                            duplicate_records_df,
-                            use_container_width=True,
-                            hide_index=True,
-                        )
-
-                    else:
-                        st.success(
-                            "No duplicate or potentially conflicting "
-                            "financial records were identified."
-                        )
-
-                else:
-                    st.info("No duplicate financial records available.")
-
-        else:
-
-            st.info(
-                "Upload documents and click 'Extract Financial Figures "
-                "from All Documents' to begin."
-            )
 
         # --------------------------------------------------
-        # 9. DOCUMENT PREVIEWS
+        # 11. CALCULATED FINANCIAL METRICS
         # --------------------------------------------------
+
+        with calculated_tab:
+            render_calculated_metrics()
+
+
+        # --------------------------------------------------
+        # 12. DOCUMENT PREVIEWS
+        # --------------------------------------------------
+
+        st.divider()
 
         with st.expander("Preview text chunks"):
 
@@ -491,7 +723,7 @@ if uploaded_files:
 
         with st.expander("Preview extracted text"):
 
-            for document in document_pages:
+            for document in unique_document_pages:
 
                 st.markdown(f"### {document['name']}")
 
@@ -509,3 +741,6 @@ if uploaded_files:
         st.warning(
             "No extractable text was found in the uploaded PDFs."
         )
+
+else:
+    st.info("Upload one or more PDFs to get started.")
